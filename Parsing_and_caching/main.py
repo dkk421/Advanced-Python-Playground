@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime as dt
 import json
+import heapq
 
 from pathlib import Path
 import re
@@ -11,7 +12,7 @@ class LogEvent:
     event_type: str
     datetime: dt
     message: str
-
+    params: dict[str, str]
 
 class LogReader:
     def __init__(self, log_dir: str | Path) -> None:
@@ -66,48 +67,49 @@ class LogReader:
                     continue
 
                 payload = json.loads(line)
-        try:
-            event_dt_raw = payload["datetime"]
-            event_type = payload["event_type"]
-            message_template = payload["message"]
-            params = payload["params"]
-        except KeyError as exc:
-            raise ValueError(
-                f"Missing required field {exc.args[0]!r} in {path.name} at line {line_number}"
-            ) from exc
+                try:
+                    event_dt_raw = payload["datetime"]
+                    event_type = payload["event_type"]
+                    message_template = payload["message"]
+                    params = payload["params"]
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Missing required field {exc.args[0]!r} in {path.name} at line {line_number}"
+                    ) from exc
 
-        if not isinstance(params, dict):
-            raise ValueError(
-                f"'params' must be a dict in {path.name} at line {line_number}"
-            )
+                if not isinstance(params, dict):
+                    raise ValueError(
+                        f"'params' must be a dict in {path.name} at line {line_number}"
+                    )
 
-        try:
-            event_dt = dt.fromisoformat(event_dt_raw)
-        except ValueError as exc:
-            raise ValueError(
-                f"Invalid datetime format in {path.name} at line {line_number}"
-            ) from exc
+                try:
+                    event_dt = dt.fromisoformat(event_dt_raw)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Invalid datetime format in {path.name} at line {line_number}"
+                    ) from exc
 
-        if event_type not in {"ERROR", "INFO", "DEBUG"}:
-            raise ValueError(
-                f"Invalid event_type {event_type!r} in {path.name} at line {line_number}"
-            )
+                if event_type not in {"ERROR", "INFO", "DEBUG"}:
+                    raise ValueError(
+                        f"Invalid event_type {event_type!r} in {path.name} at line {line_number}"
+                    )
 
-        try:
-            message = message_template.format(**params)
-        except KeyError as exc:
-            raise ValueError(
-                f"Missing interpolation parameter {exc.args[0]!r} in {path.name} at line {line_number}"
-            ) from exc
+                try:
+                    message = message_template.format(**params)
+                except KeyError as exc:
+                    raise ValueError(
+                        f"Missing interpolation parameter {exc.args[0]!r} in {path.name} at line {line_number}"
+                    ) from exc
 
-        events.append(
-            LogEvent(
-                service_name=service_name,
-                datetime=event_dt,
-                event_type=event_type,
-                message=message,
-            )
-        )
+                events.append(
+                    LogEvent(
+                        service_name=service_name,
+                        datetime=event_dt,
+                        event_type=event_type,
+                        message=message,
+                        params=params,
+                    )
+                )
         return events
 
     def get_last_events(self, service_name: str, limit: int) -> list[LogEvent]:
@@ -129,5 +131,101 @@ class LogReader:
                     result.reverse()
                     return result
 
+        result.reverse()
+        return result
+
+    def _get_all_log_files(self) -> list[Path]:
+        result = []
+        for path in self._log_dir.iterdir():
+            if not path.is_file():
+                continue
+            if self._FILE_RE.match(path.name) is None:
+                continue
+            result.append(path)
+        return result
+
+    def get_last_events_all(self, n: int) -> list[LogEvent]:
+        if n <= 0:
+            raise ValueError("n must be positive")
+
+        files = self._get_all_log_files()
+
+        parsed_files: list[list[LogEvent]] = []
+
+        for path in files:
+            events = self._parse_file(path)
+            if events:
+                parsed_files.append(events)
+
+        heap: list[tuple[float, int, int]] = []
+
+        for file_index, events in enumerate(parsed_files):
+            last_index = len(events) - 1
+            event = events[last_index]
+
+            heapq.heappush(
+                heap,
+                (-event.datetime.timestamp(), file_index, last_index)
+            )
+
+        result: list[LogEvent] = []
+
+        while heap and len(result) < n:
+            _, file_index, event_index = heapq.heappop(heap)
+            event = parsed_files[file_index][event_index]
+            result.append(event)
+            prev_index = event_index - 1
+            if prev_index >= 0:
+                prev_event = parsed_files[file_index][prev_index]
+                heapq.heappush(
+                    heap,
+                    (-prev_event.datetime.timestamp(), file_index, prev_index)
+                )
+        result.reverse()
+        return result
+
+    def get_last_events_all_with_object(
+            self,
+            n: int,
+            object_value: str
+    ) -> list[LogEvent]:
+        if n <= 0:
+            raise ValueError("n must be positive")
+
+        files = self._get_all_log_files()
+        parsed_files: list[list[LogEvent]] = []
+
+        for path in files:
+            events = [
+                event
+                for event in self._parse_file(path)
+                if object_value in event.params.values()
+            ]
+            if events:
+                parsed_files.append(events)
+        heap: list[tuple[float, int, int]] = []
+
+        for file_index, events in enumerate(parsed_files):
+            last_index = len(events) - 1
+            event = events[last_index]
+
+            heapq.heappush(
+                heap,
+                (-event.datetime.timestamp(), file_index, last_index)
+            )
+        result: list[LogEvent] = []
+        while heap and len(result) < n:
+            _, file_index, event_index = heapq.heappop(heap)
+            event = parsed_files[file_index][event_index]
+            result.append(event)
+            prev_index = event_index - 1
+
+            if prev_index >= 0:
+                prev_event = parsed_files[file_index][prev_index]
+
+                heapq.heappush(
+                    heap,
+                    (-prev_event.datetime.timestamp(), file_index, prev_index)
+                )
         result.reverse()
         return result
