@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import re
 
-
 @dataclass(frozen=True)
 class LogEvent:
     service_name: str
