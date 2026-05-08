@@ -16,6 +16,7 @@ class LogEvent:
 
 class LogReader:
     def __init__(self, log_dir: str | Path) -> None:
+        self._error_cache: dict[Path, list[dt]] = {}
         self._log_dir = Path(log_dir)
         if not self._log_dir.exists():
             raise FileNotFoundError(f"Directory does not exist: {self._log_dir}")
@@ -25,6 +26,38 @@ class LogReader:
     _FILE_RE = re.compile(
         r"^(?P<service>.+)_(?P<hour>\d{10})\.log$"
     )
+
+    def _get_file_errors(self, path: Path) -> list[dt]:
+        if path in self._error_cache:
+            return self._error_cache[path]
+        errors: list[dt] = []
+
+        events = self._parse_file(path)
+        for event in events:
+            if event.event_type == "ERROR":
+                errors.append(event.datetime)
+
+        self._error_cache[path] = errors
+        return errors
+
+    def get_error_counts(
+            self,
+            start: dt,
+            end: dt
+    ) -> dict[str, int]:
+        if start > end:
+            raise ValueError("start must be <= end")
+        result: dict[str, int] = {}
+        for path in self._get_all_log_files():
+            service_name, _ = self._parse_filename(path)
+            error_times = self._get_file_errors(path)
+            count = 0
+            for error_dt in error_times:
+                if start <= error_dt <= end:
+                    count += 1
+            result[service_name] = result.get(service_name, 0) + count
+
+        return result
 
     def _parse_filename(self, path: Path) -> tuple[str, dt]:
         match = self._FILE_RE.match(path.name)
@@ -229,3 +262,26 @@ class LogReader:
                 )
         result.reverse()
         return result
+
+import sys
+import sysconfig
+def detect_python_build():
+    # Проверяем тип сборки
+    gil_disabled = sysconfig.get_config_var("Py_GIL_DISABLED")
+    if gil_disabled:
+        build_type = "Free-Threading Build"
+    else:
+        build_type = "Standard Build"
+        #Проверяем статус GIL в рантайме (Python 3.13+)
+    gil_status = "Unknown"
+    if hasattr(sys, "_is_gil_enabled"):
+        gil_enabled = sys._is_gil_enabled()
+        gil_status = "ON" if gil_enabled else "OFF"
+    else:
+        gil_status = "N/A (Python < 3.13)"
+    return build_type, gil_status
+build_type, gil_status = detect_python_build()
+
+
+print("Тип сборки:", build_type)
+print("Статус GIL:", gil_status)
