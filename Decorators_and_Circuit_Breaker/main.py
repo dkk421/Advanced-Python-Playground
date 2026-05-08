@@ -26,14 +26,15 @@ def circuit_breaker(state_count, error_count, network_errors, sleep_time_sec):
                 else:
                     raise NotAliveError("Circuit breaker is OPEN. Operation not allowed.")
 
-            if state != 'OPEN' and history[-1] is False:
-                time.sleep(sleep_time_sec)
-
             if state == 'CLOSED':
                 if len(history) >= error_count and all(x is False for x in list(history)[-error_count:]):
                     state = 'OPEN'
                     last_failure_time = timestamp
                     raise NotAliveError("Service unavailable: too many consecutive failures")
+
+            if state != 'OPEN' and history[-1] is False:
+                time.sleep(sleep_time_sec)
+
             try:
                 result = func(*args, **kwargs)
             except errors_tuple as e:
